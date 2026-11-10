@@ -77,7 +77,8 @@ web/
    ├─ components/          # ChatHeader / MessageList / MessageBubble / Composer
    └─ lib/                 # sse.ts / markdown.ts / chatStorage.ts / media.ts
 test/app.e2e-spec.ts       # Supertest e2e
-vite.config.ts             # root: 'web'，端口 5173，代理 /chat → localhost:3000
+deploy/                    # 生产部署配置（Nginx 站点 + systemd 服务）
+vite.config.ts             # root: 'web'，host 0.0.0.0，端口 5173，代理 /chat → localhost:3000
 vitest.config.ts           # 单元测试（src/**/*.spec.ts）
 vitest.config.e2e.ts       # e2e 测试（test/**/*.e2e-spec.ts）
 ```

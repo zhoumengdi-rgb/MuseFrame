@@ -1,0 +1,20 @@
+# 安装到 /etc/systemd/system/museframe.service
+# ExecStart 的 node 路径用服务器上 `which node` 的结果替换。
+[Unit]
+Description=MuseFrame chat backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/MuseFrame
+Environment=NODE_ENV=production
+Environment=PORT=3000
+ExecStart=/usr/bin/node dist/main.js
+Restart=always
+RestartSec=3
+User=www-data
+Group=www-data
+
+[Install]
+WantedBy=multi-user.target

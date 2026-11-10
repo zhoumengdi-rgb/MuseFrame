@@ -81,7 +81,10 @@ low-code-test/
 │     └─ lib/                  # sse.ts / markdown.ts / chatStorage.ts / media.ts
 ├─ test/
 │  └─ app.e2e-spec.ts          # Supertest e2e 测试
-├─ vite.config.ts              # 端口 5173，代理 /chat → localhost:3000
+├─ deploy/
+│  ├─ nginx.conf               # Nginx 站点配置（静态资源 + SSE 反代）
+│  └─ museframe.service        # systemd 后端服务
+├─ vite.config.ts              # host 0.0.0.0，端口 5173，代理 /chat → localhost:3000
 ├─ vitest.config.ts            # 单元测试配置
 ├─ vitest.config.e2e.ts        # e2e 测试配置
 ├─ nest-cli.json
@@ -91,7 +94,7 @@ low-code-test/
 
 ## 环境要求
 
-- Node.js >= 20.12（推荐 24，`process.loadEnvFile` 依赖该版本）
+- Node.js >= 20.19（推荐 22 LTS 或 24；Vite 8 要求 `^20.19.0 || >=22.12.0`，`process.loadEnvFile` 要求 >= 20.12）
 - npm
 - 可用的 DashScope API Key；如需图像 / 视频功能，账号还需具备 `qwen-image-3.0` 与 `happyhorse-1.1-t2v` 的模型权限
 
@@ -373,13 +376,43 @@ npm run test:e2e
 
 ## 生产部署
 
+仓库提供两份部署配置：
+
+- [`deploy/nginx.conf`](deploy/nginx.conf)：托管 `web/dist` 并把 `/chat` 反向代理到后端，已关闭 SSE 缓冲并延长超时
+- [`deploy/museframe.service`](deploy/museframe.service)：systemd 常驻后端
+
+以下以 Ubuntu、项目位于 `/opt/MuseFrame`、运行用户 `www-data` 为例：
+
 ```bash
-npm run build        # 编译后端
-npm run web:build    # 构建前端静态资源
-npm run start:prod   # 启动后端
+cd /opt/MuseFrame
+
+# 1. 安装依赖并构建
+npm ci
+npm run build        # 后端 → dist/
+npm run web:build    # 前端 → web/dist/
+
+# 2. 按“环境变量”一节创建 .env，并确保服务用户可读
+chmod 600 .env
+
+# 3. 安装并启动后端
+sudo cp deploy/museframe.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now museframe
+sudo systemctl status museframe
+
+# 4. 安装 Nginx 站点配置
+sudo cp deploy/nginx.conf /etc/nginx/conf.d/museframe.conf
+sudo mv /etc/nginx/sites-enabled/default /root/nginx-default.bak
+sudo nginx -t
+sudo systemctl reload nginx
 ```
 
-后端只提供 `/chat` 接口，`web/dist/` 需由 Nginx 等静态服务器托管；若前后端不同源，请把 `/chat` 反向代理到后端，或在代码中改为完整 API 地址并配置 CORS。
+- `museframe.service` 中的 `ExecStart` 需换成服务器 `which node` 的结果；CentOS 等系统把 `www-data` 改为 `nginx`，并注释掉 `nginx.conf` 中自带的 `default_server` 站点块
+- 确保运行用户能读取 `/opt/MuseFrame/.env` 与 `dist/`，必要时 `chown -R www-data:www-data /opt/MuseFrame`
+- 安全组只放行 `80/443` 与 SSH，不要对公网开放 `3000/5173`
+- 浏览器访问 `http://服务器公网IP`；绑定域名后可执行 `certbot --nginx -d 你的域名` 启用 HTTPS
+
+后端只提供 `/chat` 接口，`web/dist/` 由 Nginx 托管，前后端同源，因此无需额外配置 CORS。不要把 `npm run web:dev` 暴露到公网：Vite 开发服务器不适用于生产，且 `allowedHosts: true` 会放宽 Host 校验。
 
 ## 浏览器端实现要点
 
