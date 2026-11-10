@@ -6,10 +6,10 @@ export default defineConfig({
   plugins: [react()],
   server: {
     host: '0.0.0.0',
-    port: 3000,
     allowedHosts: true,
-    // proxy: {
-    //   '/chat': 'http://localhost:3000',
-    // }
-  }
+    port: 5173,
+    proxy: {
+      '/chat': 'http://localhost:3000',
+    },
+  },
 });
