@@ -1,7 +1,9 @@
 import { toChatMediaList } from './media';
-import type { ChatMessage } from '../types';
+import { toChatSummary } from './summary';
+import type { ChatMessage, ChatSummary } from '../types';
 
 const STORAGE_KEY = 'sse-chat-history';
+const SUMMARY_KEY = 'sse-chat-summary';
 
 export function loadHistory(): ChatMessage[] {
   try {
@@ -26,4 +28,20 @@ export function loadHistory(): ChatMessage[] {
 
 export function saveHistory(messages: ChatMessage[]): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(messages));
+}
+
+export function loadSummary(): ChatSummary | null {
+  try {
+    return toChatSummary(JSON.parse(localStorage.getItem(SUMMARY_KEY) ?? 'null'));
+  } catch {
+    return null;
+  }
+}
+
+export function saveSummary(summary: ChatSummary | null): void {
+  if (summary) {
+    localStorage.setItem(SUMMARY_KEY, JSON.stringify(summary));
+  } else {
+    localStorage.removeItem(SUMMARY_KEY);
+  }
 }

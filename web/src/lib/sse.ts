@@ -2,6 +2,7 @@ export type SseEventName =
   | 'reasoning'
   | 'message'
   | 'status'
+  | 'summary'
   | 'media'
   | 'tool_call'
   | 'tool_result'

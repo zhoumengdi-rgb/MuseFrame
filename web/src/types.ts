@@ -13,6 +13,11 @@ export interface ChatMessage {
   media?: ChatMedia[];
 }
 
+export interface ChatSummary {
+  text: string;
+  upTo: number;
+}
+
 export interface PendingAnswer {
   reasoning: string;
   content: string;

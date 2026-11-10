@@ -9,13 +9,19 @@ import {
 } from '../tools/tool-protocol.js';
 import { ToolsService } from '../tools/tools.service.js';
 import type { ToolResult } from '../tools/tools.types.js';
-import { ChatMessage, ChatStreamEvent } from './chat.types.js';
+import { ChatMessage, ChatRequest, ChatStreamEvent } from './chat.types.js';
 import { detectIntent } from './intent.js';
+import {
+  buildSummarySystemContent,
+  clampCovered,
+  planSummary,
+  sanitizeSummary,
+} from './summary.format.js';
+import { SummaryService } from './summary.service.js';
 
 const DEFAULT_BASE_URL =
   'https://ws-cu8tv3qiflaw7gap.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
 const DEFAULT_MODEL = 'qwen3.7-max';
-const MAX_HISTORY = 20;
 const MAX_TOOL_ROUNDS = 2;
 const MAX_TOOL_TEXT_TAIL = TOOL_CALL_OPEN.length - 1;
 
@@ -37,6 +43,7 @@ export class ChatService {
   constructor(
     private readonly tools: ToolsService,
     private readonly media: MediaService,
+    private readonly summarizer: SummaryService,
   ) {}
 
   normalizeMessages(input: unknown): ChatMessage[] {
@@ -49,11 +56,29 @@ export class ChatService {
           ((item as ChatMessage).role === 'user' || (item as ChatMessage).role === 'assistant') &&
           typeof (item as ChatMessage).content === 'string',
       )
-      .slice(-MAX_HISTORY)
       .map(({ role, content }) => ({ role, content }));
   }
 
-  async *stream(messages: ChatMessage[], signal?: AbortSignal): AsyncGenerator<ChatStreamEvent> {
+  normalizeRequest(input: unknown): ChatRequest {
+    const body = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
+    const messages = this.normalizeMessages(body.messages);
+    const summary = typeof body.summary === 'string' ? sanitizeSummary(body.summary) : '';
+    const upTo =
+      typeof body.summaryUpTo === 'number' &&
+      Number.isInteger(body.summaryUpTo) &&
+      body.summaryUpTo >= 0
+        ? body.summaryUpTo
+        : null;
+    if (!summary || upTo === null) return { messages };
+
+    // 摘要至少要留下最后一条消息，避免客户端传入越界的 summaryUpTo 后丢失本轮提问
+    const limit = Math.max(0, messages.length - 1);
+
+    return { messages, summary, summaryUpTo: clampCovered(upTo, limit) };
+  }
+
+  async *stream(request: ChatRequest, signal?: AbortSignal): AsyncGenerator<ChatStreamEvent> {
+    const messages = request.messages;
     const lastUser = [...messages].reverse().find((message) => message.role === 'user');
     if (lastUser) {
       const intent = detectIntent(lastUser.content);
@@ -63,19 +88,51 @@ export class ChatService {
       }
     }
 
-    const conversation: ChatMessage[] = [...messages];
+    let summary = request.summary?.trim() ?? '';
+    const covered = clampCovered(request.summaryUpTo ?? 0, Math.max(0, messages.length - 1));
+    let conversation: ChatMessage[] = messages.slice(covered);
+
+    const plan = planSummary(messages, covered);
+    if (plan) {
+      yield { event: 'status', data: '正在整理更早的对话…' };
+      let nextSummary = '';
+      try {
+        nextSummary = await this.summarizer.summarize(summary, plan.overflow, signal);
+      } catch {
+        // 摘要失败不阻塞本轮回答，保留旧摘要并在下一轮重试
+      }
+      if (signal?.aborted) return;
+
+      conversation = plan.recent;
+      if (nextSummary) {
+        summary = nextSummary;
+        yield {
+          event: 'summary',
+          data: { text: summary, upTo: plan.nextSummaryUpTo },
+        };
+      }
+      yield { event: 'status', data: '' };
+    }
+
+    const summarySystem = summary ? buildSummarySystemContent(summary) : null;
 
     for (let round = 0; ; round++) {
       const allowTools = round < MAX_TOOL_ROUNDS;
       const system = allowTools
         ? this.tools.buildSystemPrompt(SYSTEM_PROMPT)
         : `${SYSTEM_PROMPT}\n\n本轮禁止调用任何工具，请直接基于已有的工具结果和上下文回答用户。`;
+      const systemMessages: OpenAI.Chat.ChatCompletionMessageParam[] = summarySystem
+        ? [
+            { role: 'system', content: summarySystem },
+            { role: 'system', content: system },
+          ]
+        : [{ role: 'system', content: system }];
 
       let completion: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
       try {
         const params: DashScopeParams = {
           model: process.env.DASHSCOPE_MODEL ?? DEFAULT_MODEL,
-          messages: [{ role: 'system', content: system }, ...conversation],
+          messages: [...systemMessages, ...conversation],
           stream: true,
           enable_thinking: true,
         };

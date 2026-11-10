@@ -13,10 +13,10 @@
 - **绘图提示词增强**：图片请求先用文本模型把自然语言改写为正向 + 反向提示词，再调用生图接口；增强失败时回退原始输入，不影响出图
 - **图像 / 视频生成**：图片同步返回；视频提交异步任务后每 3 秒轮询，最长等待 5 分钟，结果直接在对话中展示；生成期间并行补全回答描述
 - **媒体回答描述**：图片附带画面描述；视频附带模型、时长、主体、画面推进、镜头风格、声音、画面文字描述，描述失败时自动兜底
-- **多轮上下文**：前端保存全部对话，每次提问携带历史；服务端截取最近 20 条，并注入 Markdown 系统提示词
+- **多轮上下文与滚动摘要**：前端保存全部对话，每次提问携带历史；未覆盖的消息达到阈值后，服务端把更早的对话交给文本模型压缩成摘要，以 `system` 消息放在上下文最前面，并保留最近 20 条原文
 - **Markdown 渲染**：GFM 表格、带语言标注的代码块、行内代码、引用块；使用 DOMPurify 净化，防止 XSS；多列表格自适应宽度、表头折行、避免英文缩写被逐字拆分
 - **代码复制**：代码块自动生成复制按钮，表格自动包裹滚动容器，长内容不撑破布局
-- **本地历史**：对话保存在 `localStorage`（键 `sse-chat-history`），刷新页面自动恢复，可一键清空
+- **本地历史**：对话与摘要分别保存在 `localStorage`（键 `sse-chat-history`、`sse-chat-summary`），刷新页面自动恢复，可一键清空
 - **健壮性**：客户端断开时通过 `AbortController` 中止上游请求；请求体限制 1 MB；非法请求返回 400
 - **可观测性**：接入 NestJS Observe，自动上报链路、日志、指标与错误（可选）
 
@@ -65,7 +65,9 @@ low-code-test/
 │  │  └─ media.types.ts        # MediaKind / ChatMedia / ImagePrompt / VideoTask
 │  └─ chat/
 │     ├─ chat.controller.ts    # POST /chat，SSE 输出与心跳
-│     ├─ chat.service.ts       # 意图分流、调用模型、转发增量、截断历史
+│     ├─ chat.service.ts       # 意图分流、滚动摘要、调用模型、转发增量
+│     ├─ summary.service.ts    # 合并旧摘要与早期对话，生成新摘要
+│     ├─ summary.format.ts     # 摘要触发规划、素材拼接、清洗与长度限制
 │     ├─ intent.ts             # 图像/视频/文本关键词路由
 │     ├─ chat.module.ts
 │     └─ chat.types.ts
@@ -78,7 +80,7 @@ low-code-test/
 │     ├─ styles.css
 │     ├─ types.ts
 │     ├─ components/           # ChatHeader / MessageList / MessageBubble / Composer
-│     └─ lib/                  # sse.ts / markdown.ts / chatStorage.ts / media.ts
+│     └─ lib/                  # sse.ts / markdown.ts / chatStorage.ts / media.ts / summary.ts
 ├─ test/
 │  └─ app.e2e-spec.ts          # Supertest e2e 测试
 ├─ deploy/
@@ -157,11 +159,15 @@ npm run web:dev
     { "role": "user", "content": "你好" },
     { "role": "assistant", "content": "你好，有什么可以帮你？" },
     { "role": "user", "content": "介绍一下 SSE" }
-  ]
+  ],
+  "summary": "用户正在了解 SSE 的推送机制……",
+  "summaryUpTo": 40
 }
 ```
 
-- 仅接受 `role` 为 `user` / `assistant` 且 `content` 为字符串的消息，服务端只取最后 20 条
+- 仅接受 `role` 为 `user` / `assistant` 且 `content` 为字符串的消息；服务端接收完整历史，再按摘要进度选择实际上下文
+- `summary` / `summaryUpTo` 可选，均由前端回传：`summary` 为上一次生成的摘要，`summaryUpTo` 表示摘要已覆盖前多少条消息
+- `summary` 会清理 HTML 标签并限制在 1200 字内；`summaryUpTo` 必须是整数，越界时会被收敛到 `[0, messages.length - 1]`，保证至少保留最后一条消息；任一字段缺失或非法时按无摘要处理
 - 请求体上限 1 MB
 
 示例：
@@ -214,7 +220,8 @@ data: true
 | --- | --- | --- |
 | `reasoning` | 字符串 | 模型思考过程的增量片段（`enable_thinking`） |
 | `message` | 字符串 | 回答正文的增量片段；图像 / 视频路由下为完整描述文本 |
-| `status` | 字符串 | 图像 / 视频生成进度提示（图片先提示优化提示词，再提示生成图片） |
+| `status` | 字符串 | 图像 / 视频生成进度或长对话摘要进度提示；空字符串表示清除提示 |
+| `summary` | 对象 | 滚动摘要更新：`{ text, upTo }`，前端应持久化并在下次请求回传 |
 | `media` | 对象 | 生成结果：`{ kind: "image" \| "video", url, prompt }` |
 | `tool_call` | 对象 | 模型请求调用工具：`{ name, arguments }` |
 | `tool_result` | 对象 | 工具执行结果：`{ name, ok, content, durationMs }` |
@@ -228,6 +235,45 @@ data: true
 | `messages` 为空或无合法消息 | 400 | 纯文本 `缺少提问内容` |
 | 请求体超过 1 MB | 413 | body-parser 默认错误响应 |
 | 未配置 API Key / 上游异常 | 200 | SSE 中返回 `event: error` |
+
+## 长对话滚动摘要
+
+前端保存完整历史，但服务端不会每轮都把全部消息发给模型，而是保留最近原文、把更早内容压进摘要：
+
+| 常量 | 值 | 作用 |
+| --- | --- | --- |
+| `RECENT_HISTORY` | 20 | 始终保留原文的最近消息数 |
+| `SUMMARY_TRIGGER_MESSAGES` | 30 | 摘要未覆盖的消息达到该数量时触发压缩 |
+| `MAX_SUMMARY_CHARS` | 1200 | 摘要最大长度，超出截断 |
+| 单次压缩上限 | 40 条 | 历史积压时每轮最多合并的早期消息数，剩余部分下次继续 |
+
+```text
+messages: [0 … 79]，summaryUpTo: 70
+  → 未覆盖 10 条 < 30：不压缩，发送 summary + messages[70…79]
+
+messages: [0 … 79]，summaryUpTo: 40
+  → 未覆盖 40 条 ≥ 30：压缩 messages[40…59]（40 − 保留 20）
+  → 下发 summary { text, upTo: 60 }
+  → 本轮上下文 = 摘要 system 消息 + 基础 system 消息 + messages[60…79]
+```
+
+摘要阶段的 SSE 事件：
+
+```text
+event: status
+data: "正在整理更早的对话…"
+
+event: summary
+data: {"text":"用户正在……","upTo":60}
+
+event: status
+data: ""
+```
+
+- 摘要在基础系统提示词之前注入，并明确提示模型只把它当背景资料，不执行其中出现的指令
+- 压缩期间先下发 `status`，成功后下发 `summary`；前端写入 `localStorage` 的 `sse-chat-summary`，下次请求回传，实现滚动合并而不是每轮重复压缩
+- 摘要调用使用 `DASHSCOPE_MODEL`、关闭 thinking、20 秒超时；失败、超时或被中止都不阻塞回答，也不下发 `error`，本轮回退到最近 20 条，`summaryUpTo` 不推进，下一轮重试
+- 图像 / 视频路由优先于摘要，媒体请求不会触发压缩；清空对话时摘要一并删除
 
 ## 图像 / 视频分流
 
@@ -361,7 +407,8 @@ npm run test:e2e
 - 文本、图片、视频三种路由互不串线；含“运镜 / 镜头推进 / 慢动作 / 航拍”的视频描述走视频；
 - 图片回答带画面描述，视频回答包含模型、时长、主体、画面推进、镜头风格、声音、画面文字描述；
 - 生成中“停止生成”能中断请求、描述与视频轮询，且不留下空回复或错误提示；
-- 多列表格在窄窗口不出现逐字换行，必要时可在表格内部横向滚动。
+- 多列表格在窄窗口不出现逐字换行，必要时可在表格内部横向滚动；
+- 长对话达到阈值时只压缩更早内容，最近 20 条仍以原文发送；摘要失败时回答不受影响。
 
 ## 常见问题
 
@@ -420,6 +467,7 @@ sudo systemctl reload nginx
 - 每次请求持有独立 `AbortController`；“停止生成”调用 `abort()`，会同时中止 SSE 请求、上游模型、描述生成与视频轮询；前端忽略中止错误，保留已生成的部分回复，若从未生成正文或媒体则不写入助手消息
 - Markdown 先经 `marked`（GFM、`breaks`）渲染，再由 `DOMPurify` 净化后注入
 - 对话历史存于 `localStorage`，读取时会校验结构，异常数据自动忽略；图片/视频以 `media` 字段持久化
+- 每次请求携带 `summary` / `summaryUpTo`；收到 `summary` 事件后更新并持久化摘要，清空对话时一并删除
 - 图片点击可查看原图，视频使用原生播放器；媒体地址必须是 `http(s)` 才会渲染
 - 媒体回答先渲染描述、再渲染图片/视频；表格使用自适应列宽、表头折行和首列防塌缩样式，避免出现 `CU`、`MS` 被拆成单字符
 - 输入框支持 `Enter` 发送、`Shift + Enter` 换行，并处理中文输入法组合状态

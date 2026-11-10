@@ -4,6 +4,8 @@ import { ChatService } from './chat.service.js';
 
 interface ChatRequestBody {
   messages?: unknown;
+  summary?: unknown;
+  summaryUpTo?: unknown;
 }
 
 @Controller('chat')
@@ -16,8 +18,8 @@ export class ChatController {
     @Req() req: Request,
     @Res() res: Response,
   ): Promise<void> {
-    const messages = this.chatService.normalizeMessages(body?.messages);
-    if (!messages.length) {
+    const request = this.chatService.normalizeRequest(body);
+    if (!request.messages.length) {
       res.status(400).type('text/plain').send('缺少提问内容');
       return;
     }
@@ -41,7 +43,7 @@ export class ChatController {
     }, 15_000);
 
     try {
-      for await (const event of this.chatService.stream(messages, abort.signal)) {
+      for await (const event of this.chatService.stream(request, abort.signal)) {
         if (res.writableEnded || res.destroyed) break;
         res.write(`event: ${event.event}\ndata: ${JSON.stringify(event.data)}\n\n`);
       }

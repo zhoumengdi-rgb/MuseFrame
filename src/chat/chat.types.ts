@@ -8,10 +8,17 @@ export interface ChatMessage {
   media?: ChatMedia[];
 }
 
+export interface ChatRequest {
+  messages: ChatMessage[];
+  summary?: string;
+  summaryUpTo?: number;
+}
+
 export type ChatStreamEvent =
   | { event: 'reasoning'; data: string }
   | { event: 'message'; data: string }
   | { event: 'status'; data: string }
+  | { event: 'summary'; data: { text: string; upTo: number } }
   | { event: 'media'; data: ChatMedia }
   | { event: 'tool_call'; data: { name: string; arguments: Record<string, unknown> } }
   | {

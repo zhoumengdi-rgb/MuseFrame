@@ -2,13 +2,18 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import ChatHeader from './components/ChatHeader';
 import Composer from './components/Composer';
 import MessageList from './components/MessageList';
-import { loadHistory, saveHistory } from './lib/chatStorage';
+import { loadHistory, loadSummary, saveHistory, saveSummary } from './lib/chatStorage';
 import { toChatMedia } from './lib/media';
 import { readSse } from './lib/sse';
-import type { ChatMedia, ChatMessage, PendingAnswer } from './types';
+import { toChatSummary } from './lib/summary';
+import type { ChatMedia, ChatMessage, ChatSummary, PendingAnswer } from './types';
 
 export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>(loadHistory);
+  const [summary, setSummary] = useState<ChatSummary | null>(() => {
+    const saved = loadSummary();
+    return saved && saved.upTo < messages.length ? saved : null;
+  });
   const [pending, setPending] = useState<PendingAnswer | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [streaming, setStreaming] = useState(false);
@@ -17,6 +22,10 @@ export default function App() {
   useEffect(() => {
     saveHistory(messages);
   }, [messages]);
+
+  useEffect(() => {
+    saveSummary(summary);
+  }, [summary]);
 
   const handleSend = useCallback(
     async (text: string) => {
@@ -37,7 +46,10 @@ export default function App() {
         const response = await fetch('/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ messages: toApiMessages(nextMessages) }),
+          body: JSON.stringify({
+            messages: toApiMessages(nextMessages),
+            ...(summary ? { summary: summary.text, summaryUpTo: summary.upTo } : {}),
+          }),
           signal: controller.signal,
         });
         if (!response.ok) {
@@ -49,6 +61,9 @@ export default function App() {
             setPending((prev) => (prev ? { ...prev, reasoning: prev.reasoning + String(data) } : prev));
           } else if (event === 'status') {
             setPending((prev) => (prev ? { ...prev, status: String(data) } : prev));
+          } else if (event === 'summary') {
+            const next = toChatSummary(data);
+            if (next) setSummary(next);
           } else if (event === 'media') {
             const item = toChatMedia(data);
             if (item) {
@@ -95,7 +110,7 @@ export default function App() {
         setPending(null);
       }
     },
-    [messages, streaming],
+    [messages, summary, streaming],
   );
 
   const handleStop = useCallback(() => {
@@ -105,6 +120,7 @@ export default function App() {
   const handleClear = useCallback(() => {
     if (streaming) return;
     setMessages([]);
+    setSummary(null);
     setError(null);
   }, [streaming]);
 
